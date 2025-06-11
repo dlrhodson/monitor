@@ -18,7 +18,6 @@ then
 fi
 
 
-gws=$1
 monitor="$gws/monitor"
 public="$gws/public/monitor"
 
