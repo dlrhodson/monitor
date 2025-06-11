@@ -26,7 +26,7 @@ if [[ -e $monitor ]]
 then
     echo "$monitor already exists"
 else
-    mkdir -P $monitor
+    mkdir -p $monitor
 
     echo "$monitor created"
 fi
@@ -36,14 +36,14 @@ if [[ -e $public ]]
 then
     echo "$public already exists"
 else
-    mkdir -P $public
+    mkdir -p $public
     echo "$public created"
 fi
 fullp=${public%/*}
 echo -e "please email support@jasmin.ac.uk to ask that $fullp is made web accessible"
 
 #link web directory in monitor working directory
-ln -s $public $monitor/public
+ln -s $public $monitor/public 
 mkdir -p $monitor/public/IMAGES
 ln -s $monitor/public/IMAGES $monitor/IMAGES
 
