@@ -30,6 +30,41 @@ import json
 patch_file='cf_patches.py'
 exec(compile(source=open(patch_file).read(), filename=patch_file, mode='exec'))
 
+
+def fix_time_axis(fieldlist):
+    #Check to see if we are using an auxiliary time axis
+    has_time_axis = False
+    if len(fieldlist) > 0:
+        field = fieldlist[0]
+        for aux_axis in field.auxiliary_coordinates().values():
+            if hasattr(aux_axis, 'standard_name') and aux_axis.standard_name == 'time':
+                has_time_axis = True
+                #replace time axis with auxiliar axis
+        if not has_time_axis:
+            #no aux time axis - don't need to do anythinhg
+            return
+        
+        for field in fieldlist:
+            #find time axis
+            #which have axis defined
+            coords_with_axis=[x for x in field.coords().values() if x.has_property('axis')]
+            T_axis=[x for x in coords_with_axis if x.axis=='T']
+            aux_axis=field.aux('time')
+            if len (T_axis)!=1:
+                print("Can't find T axis?")
+                exit()
+            T_axis=T_axis[0]
+            if T_axis.has_property('standard_name'):
+                T_axis_name=T_axis.standard_name
+            else:
+                T_axis_name='axis=T'
+            field.del_construct(T_axis_name)
+            new_T_axis=cf.DimensionCoordinate(data=aux_axis.data,properties=aux_axis.properties())
+
+            field.del_construct('time')
+            field.set_construct(new_T_axis)
+    return()
+
 def get_NAO(jfm):
     q_jfm=cf.Query("ge", 1)&cf.Query("le", 3)
     q_jfm=q_jfm.addattr("month")
@@ -101,6 +136,7 @@ def read_cice(patterns):
 def read_ocean(stream,patterns):
     #Read in All ocean files
     files=[]
+
     #loop over all pattern is comma separated list
     for pattern in patterns.split(','):
         files.extend(glob.glob(data_dir+'/*'+pattern+'*'+stream+'*'))
@@ -147,17 +183,51 @@ def get_ocean(ocean_variables,patterns):
     ocean_list=cf.FieldList()
     print("Reading Ocean Data..")
 
+    #Loop over all grids
     for grid in ocean_variables:
         print(grid)
+        #Read in all data from this grid
         data_ocean=read_ocean(grid,patterns)
 
         if data_ocean==0:
             print("Ocean "+grid+" data missing??")
             exit(99)
+        #We'll treat diaptr (AMOC) differently
         if not 'diaptr' in grid:
 
-            cell_thickness=data_ocean.select('cell_thickness')[0]
-            cell_area=data_ocean.select('cell_area')[0]
+
+            #First we need to compute the cell volume from the
+            #cell_area and cell-thickness
+            #cell_thickness varies in time, so need to extract for all times
+            
+            
+            #use thkcello, as the standard_name cell_thickness can be used for
+            #other diagnostics
+            
+            cell_thickness=data_ocean.select_by_ncvar('thkcello')
+            if len(cell_thickness)==0:
+                print("No cell thickness! Cannot compute ocean means")
+                exit()
+                
+            
+            cell_area=data_ocean.select('cell_area')
+            if len(cell_area)==0:
+                #no explicit cell area diagnostic
+                #does cell_thickness have a cell_area?
+
+                if hasattr(cell_thickness[0], 'cell_measures'):
+                    # Get cell measures dictionary
+                    measures = cell_thickness[0].cell_measures()
+                    # Check if 'area' key exists in cell_measures
+                    cell_area_found=False
+                    for measure in measures.values():
+                        if 'area' in measure.identity():
+                            cell_area=measure.data
+                            cell_area_found=True
+                    if not cell_area_found:
+                        print("No cell area measure found in cell_thickness")
+                        exit()
+
             cell_volume_measure=compute_cell_volume_measure(cell_thickness,cell_area)
 
         
@@ -165,18 +235,18 @@ def get_ocean(ocean_variables,patterns):
         for variable in these_variables:
             if not 'diaptr' in grid: 
                 print("Global mean of "+variable)
-
-                field1=cf.aggregate(data_ocean.select(variable),relaxed_identities=True)
-                if len(field1)==0:
+                data_ocean_var=data_ocean.select(variable)
+                if len(data_ocean_var)==0:
                     print("No data for "+variable)
                     exit(99)
-                if len(field1)>1:
-                    print(variable+" did not aggregate well")
-                    print(field1)
-                field=field1[0]    
-                ocean_index=ocean_depth_mean(field,cell_volume_measure)  
+                #Fix time axis, if necessary
+                fix_time_axis(data_ocean_var)
+
+    
+                ocean_index=ocean_depth_mean(data_ocean_var,cell_volume_measure)  
                 ocean_list.append(ocean_index)
             else:
+
                 print("Process diaptr")
                 if 'meridional_streamfunction_atlantic' in variable:
                     ocean_index=get_amoc_45N(data_ocean)
@@ -346,19 +416,31 @@ def fix_axes(cf_field):
             exit(99)
 
 
-def compute_cell_volume_measure(cell_thickness,cell_area):
-    cell_volume_np=cell_area.array*cell_thickness.array
-    #create CellMeasure
-    cell_volume=cf.CellMeasure(data=cf.Data(np.squeeze(cell_volume_np)))
-    cell_volume.units="m3"
-    cell_volume.measure="volume"
-    return(cell_volume)
+def compute_cell_volume_measure(cell_thickness_fieldlist,cell_area):
+    cell_volume_fieldlist=cf.FieldList()
+    for field in cell_thickness_fieldlist:
+        cell_volume_np=cell_area.array*field.array
+        #create CellMeasure
+        cell_volume=cf.CellMeasure(data=cf.Data(np.squeeze(cell_volume_np)))
+        cell_volume.units="m3"
+        cell_volume.measure="volume"
+        cell_volume_fieldlist.append(cell_volume)
+    
+    return(cell_volume_fieldlist)
 
-def ocean_depth_mean(field,cell_measure_volume):
-    field.set_construct(cell_measure_volume)
-    fix_axes(field)
-    ocean_mean=field.collapse('volume: mean', measure=True,squeeze=True)
-    ocean_mean.standard_name='global_mean_'+ocean_mean.standard_name
+def ocean_depth_mean(field_list,cell_measure_volume_list):
+
+    # Zip the field_list and cell_measure_volume_list together
+    ocean_depth_mean_list=cf.FieldList()
+    for field, cell_volume in zip(field_list, cell_measure_volume_list):
+        # Set the cell volume measure for this field
+        field.set_construct(cell_volume)
+        fix_axes(field)
+        ocean_mean=field.collapse('volume: mean', measure=True,squeeze=True)
+        ocean_mean.standard_name='global_mean_'+ocean_mean.standard_name
+        ocean_depth_mean_list.append(ocean_mean)
+
+    ocean_mean=cf.aggregate(ocean_depth_mean_list)
     return(ocean_mean)
 
 
@@ -450,7 +532,43 @@ def get_amoc_45N(data):
 
     print("AMOC45")
 
-    amoc1=cf.aggregate(data.select_by_ncvar('zomsfatl'),relaxed_identities=True)
+    data_ocean_var=data.select_by_ncvar('zomsfatl')
+    if len(data_ocean_var)==0:
+        print("No zomsfatl for AMOC!")
+        exit(99)
+
+
+    #find jline at 45N
+    ysize=str(data_ocean_var[0].coord('latitude').array.shape[0])
+    if not ysize in amoc_45_mappings:
+        print("Unrecognised model resolution when computing AMOC 45N?")
+        print(ysize)
+     
+        exit()
+    amoc_45_jline=int(amoc_45_mappings[ysize])
+
+
+    #need to reduce x axis for GC3.1 but not UKESM ere
+    reduce_x_axis=True
+    if data_ocean_var[0].axis('ncdim%x').size==1:
+        reduce_x_axis=False
+
+
+        
+    #remove unnecessary x axis
+    data_ocean_var_new=cf.FieldList()
+    for field in data_ocean_var:
+        new_field=field.squeeze('ncdim%x')
+        new_field.del_construct('longitude')
+        new_field.del_construct('latitude')
+        #latitude aux axis is not helpful here
+        new_field.del_construct('ncdim%x')
+        data_ocean_var_new.append(new_field)
+        
+    #Fix time axis, if necessary                                                                               
+    fix_time_axis(data_ocean_var_new)
+
+    amoc1=cf.aggregate(data_ocean_var_new,relaxed_identities=True)
     if len(amoc1)>1:
         print("Amoc aggregation failed")
         print(amoc1)
@@ -458,19 +576,23 @@ def get_amoc_45N(data):
     amoc=cf.FieldList()
 
     #remove the auxiliary time axis - prevents aggregation
-    ysize=str(amoc1[0].coord('latitude').array.shape[0])
-    if not ysize in amoc_45_mappings:
-        print("Unrecognised model resolution when computing AMOC 45N?")
-        print(ysize)
-     
-        exit()
-    amoc_45_jline=int(amoc_45_mappings[ysize])
-    amoc_m1=amoc1[0][:,:,amoc_45_jline,:].array.squeeze()
-    #find the first i that has a non-masked value along this jline
-    first_non_masked_i=np.ma.flatnotmasked_edges(amoc_m1)[0]
-    #get list of domain axes to squeeze (all but a time axis)
+    #ysize=str(amoc1[0].coord('latitude').array.shape[0])
+    #if not ysize in amoc_45_mappings:
+    #    print("Unrecognised model resolution when computing AMOC 45N?")
+    #    print(ysize)
+    # 
+    #    exit()
+    #amoc_45_jline=int(amoc_45_mappings[ysize])
+
     squeeze_axes=[ x.identity() for x in amoc1[0].domain_axes().values() if not 'time' in x.identity()]
-    amoc_m=amoc1[0][:,:,amoc_45_jline,first_non_masked_i].collapse('depth: maximum').squeeze(squeeze_axes)
+    if reduce_x_axis:
+        amoc_m1=amoc1[0][:,:,amoc_45_jline,:].array.squeeze()
+        #find the first i that has a non-masked value along this jline
+        first_non_masked_i=np.ma.flatnotmasked_edges(amoc_m1)[0]
+        #get list of domain axes to squeeze (all but a time axis)
+        amoc_m=amoc1[0][:,:,amoc_45_jline,first_non_masked_i].collapse('depth: maximum').squeeze(squeeze_axes)
+    else:
+        amoc_m=amoc1[0][:,:,amoc_45_jline].collapse('depth: maximum').squeeze(squeeze_axes)
 
 
     #Closest jline to 45N is j=885
@@ -533,14 +655,17 @@ try:
     ice_patterns=os.environ['ICE_PATTERNS']
     ocn_patterns=os.environ['OCN_PATTERNS']
 
-
+    ocn_t_grid=os.environ['OCN_T_GRID']
+    ocn_diaptr=os.environ['OCN_DIAPTR']
 
     
     #no MSLP in 1m? 16222
 
     outlist=cf.FieldList()
     atm_variables=[1201,1207,1208,1209,1210,1211,1235,2201,2204,2205,2206,2207,2208,3217,3223,3225,3226,3232,3234,3236,3237,3245,3317,4204,5205,5206,5215,5216,23,24,409,8023,8208,8209,8223,8225,8234,4203,16222]
-    ocean_variables={'grid_T':['sea_water_potential_temperature','sea_water_salinity'],'diaptr':['meridional_streamfunction_atlantic']}
+    #ocean_variables={'grid_T':['sea_water_potential_temperature','sea_water_salinity'],'diaptr':['meridional_streamfunction_atlantic']}
+
+    ocean_variables={ocn_t_grid:['sea_water_potential_temperature','sea_water_salinity'],ocn_diaptr:['meridional_streamfunction_atlantic']}
 
     outfile=out_dir+'/index_'+job+'_'+date+'.nc'
 
