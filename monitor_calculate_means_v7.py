@@ -258,7 +258,7 @@ def get_ice(ice_patterns):
     ice_list=cf.FieldList()
     print("Reading sea ice files")
     sea_ice_data_monthly=read_cice(ice_patterns)
-    
+
 
     if sea_ice_data_monthly==0:
         print("No CICE data!")
@@ -270,11 +270,20 @@ def get_ice(ice_patterns):
         print(aice1)
         exit(99)
     aice=aice1[0]
-    cell_area=cf.CellMeasure(data=sea_ice_data_monthly.select_by_ncvar('tarea')[0])
+    #are cell_measures defined?
+    has_cell_area=False
+    if hasattr(aice,'cell_measures'):
+        for measure in aice.cell_measures().values():
+            if 'area' in measure.identity():
+                has_cell_area=True
+
+    #if no cell area is defined - try and extract from the tarea varible
+    if not has_cell_area:
+        cell_area=cf.CellMeasure(data=sea_ice_data_monthly.select_by_ncvar('tarea')[0])
+        cell_area.units='m2'
+        cell_area.measure='area'
+        aice.set_construct(cell_area)
     
-    cell_area.units='m2'
-    cell_area.measure='area'
-    aice.set_construct(cell_area)
     aice.standard_name='sea_ice_area_fraction'
     variable_area=area_integral_seaice(aice,job)
     ice_list.extend(variable_area)
@@ -305,41 +314,57 @@ def get_atm(atm_variables,atm_patterns):
     #select fields that are monthly means over either 900s (sea ice/ocean fields) or 3600s (radiation timesteps)
     monthly_means=data_monthly.select_by_property('and',online_operation='average',interval_write='1 month')
 
+    if len(monthly_means)==0:
+        #that didn't work
+        #let's try lbtim and lbproc
+        #lbproc=128= time mean
+        #lbtim=1 hr, 360_day
+        monthly_means=data_monthly.select_by_property('and',lbtim='122',lbproc='128')
+        if len(monthly_means)==0:
+            print("Failed to find any ATM fields!")
+            exit(99)
+            
 
+    
     for variable in atm_variables:
 
         var_str=str(variable).rjust(5,'0')
         stash_code='m01s'+var_str[:-3]+'i'+var_str[-3:]
 
+
         select_variable=monthly_means.select_by_ncvar(re.compile(stash_code))
         found_flag=True
         if len(select_variable)==0:
-            print('No entry for '+stash_code+'  checking daily..')
-            select_variable_daily=data_daily.select_by_ncvar(re.compile(stash_code))
-            if len(select_variable_daily)==0:
-                print('No entry for '+stash_code+'  in daily data checking hourly')
-                select_variable_hourly=data_hourly.select_by_ncvar(re.compile(stash_code))
-                if len(select_variable_hourly)==0:
-                    print('No entry for '+stash_code+'  in hourly data ')
-                    found_flag=False
-                else:
-                    print(stash_code+' found in hourly data')
-                    select_variable=cf.FieldList()
-                    print("Converting to monthly means")
-                    for field in select_variable_hourly:
-                        select_variable.append(field.collapse('time: mean',group=cf.M()))
-            else:
-                print(stash_code+' found in daily data')
-                select_variable=cf.FieldList()
-                print("Converting to monthly means")
+             print('No entry for '+stash_code)
+             found_flag=False
+#            print('No entry for '+stash_code+'  checking daily..')
+#            select_variable_daily=data_daily.select_by_ncvar(re.compile(stash_code))
+#            if len(select_variable_daily)==0:
+#                print('No entry for '+stash_code+'  in daily data checking hourly')
+#                select_variable_hourly=data_hourly.select_by_ncvar(re.compile(stash_code))
+#                if len(select_variable_hourly)==0:
+#                    print('No entry for '+stash_code+'  in hourly data ')
+#                    found_flag=False
+#                else:
+#                    print(stash_code+' found in hourly data')
+#                    select_variable=cf.FieldList()
+#                    print("Converting to monthly means")
+#                    for field in select_variable_hourly:
+#                        select_variable.append(field.collapse('time: mean',group=cf.M()))
+#            else:
+#                print(stash_code+' found in daily data')
+#                select_variable=cf.FieldList()
+#                print("Converting to monthly means")
+#
+#                for field in select_variable_daily:
+#                    select_variable.append(field.collapse('time: mean',group=cf.M()))
 
-                for field in select_variable_daily:
-                    select_variable.append(field.collapse('time: mean',group=cf.M()))
-    
-        select_variable_ag=cf.aggregate(select_variable,relaxed_identities=True)
-        if len(select_variable_ag) >1:
-            print(select_variable_ag[0].standard_name+" has more than one entry - selecting the first occurrence")
-            select_variable_ag=select_variable_ag[0]
+
+        else:
+            select_variable_ag=cf.aggregate(select_variable,relaxed_identities=True)
+            if len(select_variable_ag) >1:
+                print(select_variable_ag[0].standard_name+" has more than one entry - selecting the first occurrence")
+                select_variable_ag=select_variable_ag[0]
             
         if found_flag:
             this_variable=select_variable_ag[0]
@@ -452,14 +477,41 @@ def fix_time_name(field):
             
 def area_integral_seaice(field,job):
 
+
     #ensure the time axis is labelled correctly!
     fix_time_name(field)
 
-    for dim in field.dims():
-        if 'first dimension' in field.coord(dim).long_name:
-            field.coord(dim).axis='X'
-        if 'second dimension' in field.coord(dim).long_name:
-            field.coord(dim).axis='Y'
+    x_found=False
+    y_found=False
+    for dim in field.coords().values():
+        if 'first dimension' in dim.long_name:
+            dim.axis='X'
+            x_found=True
+        if 'second dimension' in dim.long_name:
+            dim.axis='Y'
+            y_found=True
+
+    #UKSESM doesn't necessarily have dimension axes defined
+    if not x_found:
+        ni=field.domain_axes().filter_by_ncdim('ni')
+        if len(ni)==0:
+            print("Can't find NI axis")
+            exit(99)
+        ni_size=ni.value().size
+        
+        XX=cf.DimensionCoordinate(properties={'axis':'X','standard_name':'X'},data=cf.Data(range(ni_size)))
+        field.set_construct(XX)
+
+    if not y_found:
+        nj=field.domain_axes().filter_by_ncdim('nj')
+        if len(nj)==0:
+            print("Can't find NJ axis")
+            exit(99)
+        nj_size=nj.value().size
+        YY=cf.DimensionCoordinate(properties={'axis':'Y','standard_name':'Y'},data=cf.Data(range(nj_size)))
+        field.set_construct(YY)
+            
+        
 
 
     #fix auxillary dimensions standard_names
@@ -484,9 +536,15 @@ def area_integral_seaice(field,job):
         if not this_measure.has_property('units'):
             field.del_construct(measure)
 
- 
+
     #measure=field.cell_measure()
-    measure=field.constructs.filter_by_property(units='m2').value()
+    measure0=field.constructs.filter_by_property(units='m2')
+    if len(measure0)==0:
+        measure0=field.constructs.filter_by_property(units='m^2')
+        if len(measure0)==0:
+            print("Can't find measure units!")
+            exit(99)
+    measure=measure0.value()
 
     m_area=measure.array
     area_masked=np.ma.masked_array(m_area,mask=m_area==0)
@@ -673,9 +731,9 @@ try:
 
 
     #Ocean
-    outlist.extend(get_ocean(ocean_variables,ocn_patterns))
+    ##outlist.extend(get_ocean(ocean_variables,ocn_patterns))
     #Ice
-    outlist.extend(get_ice(ice_patterns))
+    ##outlist.extend(get_ice(ice_patterns))
     #Atm
     outlist.extend(get_atm(atm_variables,atm_patterns))
     
