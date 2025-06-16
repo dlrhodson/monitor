@@ -37,8 +37,9 @@ def rmfilt_cf(field,n):
 
 def update_webpage(this_job,webroot):
     print("Updating webpage..")
+
     image_dir=webroot+'/IMAGES'
-    files=glob.glob(image_dir+'/*'+job+'-HH*.png')
+    files=glob.glob(image_dir+'/*'+job+'*.png')
 
     webdir="../IMAGES"
     webpagedir=webroot+'/'+job
@@ -95,9 +96,9 @@ def clean_netcdf_files(file_string):
     
 def save_plot(canari,fields,filename,this_job):
 
-
+    
     outdir="IMAGES"
-    outfile=outdir+'/'+filename+'_'+this_job+'-HH'
+    outfile=outdir+'/'+filename+'_'+this_job
 
     annual_mean_flag=False
     if canari.coord('time').size>60:
@@ -114,7 +115,7 @@ def save_plot(canari,fields,filename,this_job):
      
     print("Writing "+outfile+'.png')
 
-    cfp.gopen(file=outfile)
+    cfp.gopen(file=outfile+'.png')
 
 
     if len(fields)>0:
@@ -186,7 +187,11 @@ def canari_sub_name(name,index):
     
     if 'SURFACE_TILE_FRACTIONS' in name:
         surface_tile_types=['Broadleaf_tree','Needleleaf_tree','C3_grass','C4_grass','Shrub','Urban','Water','Bare_Soil','Ice']
-        new_name=name+'_'+surface_tile_types[index]+'_'+str(index)
+        if index<len(surface_tile_types):
+            surface_tile_name=surface_tile_types[index]
+        else:
+            surface_tile_name='unknown_tile_'+str(index)
+        new_name=name+'_'+surface_tile_name+'_'+str(index)
 
     else:
         new_name=name+'_'+str(index)
@@ -203,22 +208,22 @@ var_dump=scratch+"/"+job+".bin"
 with open(var_dump, "rb") as f:
     job,field_names_unique,canari_names_unique,data,hist=pickle.load(f)
 
-#get the reference name from the hist data
-reference_name=hist[0].get_filenames().pop().split('/')[-2]
-canari_names_unique.sort()
-field_names_unique.sort()
+reference_name=''
+if hist is not None:
+    #get the reference name from the hist data
+    reference_name=hist[0].get_filenames().pop().split('/')[-2]
+    field_names_unique.sort()
+    for i in range(len(field_names_unique)):
+        print(i,":",field_names_unique[i])
     
+canari_names_unique.sort()
 for i in range(len(canari_names_unique)):
     print(i,":",canari_names_unique[i])
 
 
-for i in range(len(field_names_unique)):
-    print(i,":",field_names_unique[i])
-
-
 for canari_name in [canari_names_unique[plot_number]]:
     #does this field exist in the historical data?
-    if canari_name in field_names_unique:
+    if canari_name in field_names_unique and hist is not None:
         print(canari_name+" exists in historical data")
         hist_fields=hist.select(canari_name)
         canari_field=canari_select(data,canari_name)

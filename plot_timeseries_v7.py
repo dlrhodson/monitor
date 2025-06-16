@@ -11,9 +11,58 @@ import sys
 import os 
 import glob
 from datetime import datetime
+import configparser
 import pickle
 import uuid
 from subprocess import check_output, STDOUT, CalledProcessError
+
+def check_dir(directory):
+    if not os.path.exists(directory):
+        os.makedirs(directory)
+
+
+def get_hist(references_dict,this_model,this_experiment):
+    
+    if this_model in references_dict:
+        this_ref_model=references_dict[this_model]
+    else:
+        if '*' in references_dict:
+            this_ref_model=references_dict['*']
+        else:
+            print("No Default references defined!")
+            exit()
+
+    if this_experiment in this_ref_model:
+        this_ref_name=this_ref_model[this_experiment]
+    else:
+        if '*' in this_ref_model:
+            this_ref_name=this_ref_model['*']
+        else:
+            print("No Default references defined!")
+            exit()
+
+    print("Reading reference: "+this_ref_name+"...")
+    hist=cf.read(this_ref_name+'/*nc')
+
+    print("Data Read")
+
+    field_names=[]
+    job_names=[]
+
+
+    for field in hist:
+        if not field.has_property('standard_name'):
+            print("No standard_name!")
+            #AMOC has no standard name!
+            print(field)
+        else:    
+            field_names.append(field.standard_name)
+            job_names.append(field.properties()['variant_label'])
+
+    #get unique list
+    field_names_unique=list(set(field_names))
+    job_names_unique=list(set(job_names))
+    return(hist,field_names_unique)
 
 def parse_string_to_nested_dict(s1):
     nested_dict = {}
@@ -75,11 +124,35 @@ def clean_netcdf_files(file_string):
 
 scratch=sys.argv[1] 
 job=sys.argv[2]
-webroot=sys.argv[3]
-references=sys.argv[4]
-QUEUE=sys.argv[5].replace('_',' ')
 
-references_dict= parse_string_to_nested_dict(references)
+#QUEUE=sys.argv[3].replace('_',' ')
+
+# Try to read webhook URL from config file
+try:
+    config = configparser.ConfigParser()
+    config.read('monitor.conf')
+    
+    references = config.get('main', 'references', fallback='')
+    root = config.get('main', 'root', fallback='')
+    if root=='':
+        print("root not defined in monitor.conf?")
+        exit(99)
+    webroot=f'{root}/public/monitor'
+
+    plots_queue=config.get('main', 'plots_queue', fallback='')
+    if plots_queue=='':
+        print("plots_queue not defined!")
+        print("Please add e.g. \n plots_queue = \"-p standard --qos=short --account=epoc --mem=6000\"\n to monitor.conf")
+        exit(99)
+    QUEUE=plots_queue.replace('_',' ')
+except (FileNotFoundError, configparser.Error):
+    print("No monitor.conf?")
+    exit(99)
+
+if references=='':
+    references_dict=None
+else:
+    references_dict= parse_string_to_nested_dict(references)
 
 print("Reading "+str(job))
 
@@ -88,6 +161,7 @@ print("Reading "+str(job))
 #Let's just ignore any file that causes a read error!
 data=read_safely('monitor_index/index_'+str(job)+'*.nc')
 
+this_experiment=''
 if data[0].has_property('experiment'):
     this_experiment=data[0].properties()['experiment']
     if ' ' in this_experiment:
@@ -95,51 +169,16 @@ if data[0].has_property('experiment'):
         this_experiment=data[0].properties()['experiment_id']
 
 this_model=''
-        
 if data[0].has_property('source_id'):
     this_model=data[0].properties()['source_id']
 
-
-if this_model in references_dict:
-    this_ref_model=references_dict[this_model]
-else:
-    if '*' in references_dict:
-        this_ref_model=references_dict['*']
-    else:
-        print("No Default references defined!")
-        exit()
-
-if this_experiment in this_ref_model:
-    this_ref_name=this_ref_model[this_experiment]
-else:
-    if '*' in this_ref_model:
-        this_ref_name=this_ref_model['*']
-    else:
-        print("No Default references defined!")
-        exit()
-
-print("Reading "+this_ref_name+"...")
-hist=cf.read(this_ref_name+'/*nc')
-
-print("Data Read")
-
-field_names=[]
+hist=None
+field_names_unique=[]
 job_names=[]
-
-
-for field in hist:
-    if not field.has_property('standard_name'):
-        print("No standard_name!")
-        #AMOC has no standard name!
-        print(field)
-    else:    
-        field_names.append(field.standard_name)
-        job_names.append(field.properties()['variant_label'])
-
-#get unique list
-field_names_unique=list(set(field_names))
-job_names_unique=list(set(job_names))
-
+#only get the references (hist) if we define them!
+if references_dict is not None:
+    hist,field_names_unique=get_hist(references_dict,this_model,this_experiment)
+    
 canari_names=[]
 
 for cnames in data:
@@ -154,7 +193,7 @@ with open(var_dump, "wb") as f:
     
 print("Written dump "+var_dump)
 
-n_jobs=len(canari_names_unique)
+n_jobs=str(len(canari_names_unique))
 
 print("Launching plot array..")
 
@@ -162,6 +201,11 @@ uid= uuid.uuid4().hex
 job_dir='plot_'
 log_dir=scratch+'/../LOGS/'+job_dir
 script_dir=scratch+'/../SCRIPTS/'+job_dir
+
+#check exists, and create if not
+check_dir(log_dir)
+check_dir(script_dir)
+
 
 #create a batch file to plot a single figure for plot n for <job>
 batch_file=script_dir+'/batch_'+job+'_'+uid+'.sh'
@@ -178,7 +222,7 @@ except CalledProcessError as exc:
     print(exc.output.decode())
     
 
-sbatch='sbatch '+QUEUE+' --time=01:00:00 --array=1-'+str(n_jobs)+' --job-name test -o '+log_dir+'/%A_%a.o -e '+log_dir+'/%A_%a.e '+batch_file
+sbatch=f'sbatch {QUEUE} --time=01:00:00 --array=1-{n_jobs} --job-name {job} -o {log_dir}/%A_%a.o -e {log_dir}/%A_%a.e {batch_file}'
 
 
 print(sbatch)
