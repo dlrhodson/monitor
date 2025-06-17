@@ -481,6 +481,8 @@ def area_integral_seaice(field,job):
     #ensure the time axis is labelled correctly!
     fix_time_name(field)
 
+
+
     x_found=False
     y_found=False
     for dim in field.coords().values():
@@ -553,14 +555,16 @@ def area_integral_seaice(field,job):
 
 
     integrals=cf.FieldList()
-
     integral=field.collapse('area: integral',weights='area',measure=True,squeeze=True)
+    #convert to Mega m^2 (10^12 m^2)
+    integral.units='Mm2'
     integral.set_properties({'job': job})
     integral.standard_name='global_sea_ice_area'
     integrals.append(integral)
 
     field_N=field.subspace(latitude=cf.gt(0))
     integral_N=field_N.collapse('area: integral',weights='area',measure=True,squeeze=True)
+    integral_N.units='Mm2'
     integral_N.standard_name='northern_sea_ice_area'
     integral_N.set_properties({'job': job})
     integrals.append(integral_N)
@@ -568,6 +572,7 @@ def area_integral_seaice(field,job):
 
     field_S=field.subspace(latitude=cf.lt(0))
     integral_S=field_S.collapse('area: integral',weights='area',measure=True,squeeze=True)
+    integral_S.units='Mm2'
     integral_S.standard_name='southern_sea_ice_area'
     integral_S.set_properties({'job': job})
     integrals.append(integral_S)
@@ -731,9 +736,9 @@ try:
 
 
     #Ocean
-    ##outlist.extend(get_ocean(ocean_variables,ocn_patterns))
+    outlist.extend(get_ocean(ocean_variables,ocn_patterns))
     #Ice
-    ##outlist.extend(get_ice(ice_patterns))
+    outlist.extend(get_ice(ice_patterns))
     #Atm
     outlist.extend(get_atm(atm_variables,atm_patterns))
     
